@@ -13,18 +13,23 @@ class NoiseComponent:
 
 class WhiteNoise(NoiseComponent):
     """Gaussian white noise implementation, not time dependent"""
+    def __init__(self, amplitude: float):
+        super().__init__(amplitude)
+        self.rng = np.random.RandomState()
+    
     def generate(self, time_step: float = 1.0) -> float:
-        return np.random.normal(0, self.amplitude)
+        return self.rng.normal(0, self.amplitude)
 
 class FlickerNoise(NoiseComponent):
     """1/f noise implementation using a simple approximation, time dependent"""
     def __init__(self, amplitude: float, frequency: float = 0.1):
         super().__init__(amplitude)
         self.frequency = frequency
+        self.rng = np.random.RandomState()
     
     def generate(self, time_step: float = 1.0) -> float:
         alpha = np.exp(-self.frequency)
-        self._last_value = alpha * self._last_value + np.random.normal(0, self.amplitude * np.sqrt(1 - alpha))
+        self._last_value = alpha * self._last_value + self.rng.normal(0, self.amplitude * np.sqrt(1 - alpha))
         return self._last_value
 
 class DriftNoise(NoiseComponent):
@@ -32,27 +37,64 @@ class DriftNoise(NoiseComponent):
     def __init__(self, amplitude: float, frequency: float = 0.01):
         super().__init__(amplitude)
         self.frequency = frequency
+        # Create a separate random number generator for this instance
+        self.rng = np.random.RandomState()
     
     def generate(self, time_step: float = 1.0) -> float:
-        if np.random.random() < self.frequency:
+        if self.rng.random() < self.frequency:
             self._last_value = 0.0
-        self._last_value += np.random.normal(0, self.amplitude)
+        self._last_value += self.rng.normal(0, self.amplitude)
         return self._last_value
 
-class PPCO2Model:
-    """Complete model for ppCO2 measurements in CDRA systems, including both true value variation and sensor noise"""
-    def __init__(self, temperature: float = 298.15):
+class PPCO2TrueValue:
+    """Models the true CO2 level variations in the environment"""
+    def __init__(self):
         # True value variation parameters
-        self.base_variation = 0.0002  # 0.02% base variation
-        self.mixing_time = 0.1        # Time constant for air mixing (seconds)
-        self.ventilation_effect = 0.0001  # Effect of ventilation changes
-        self.pressure_effect = 0.00015    # Effect of pressure variations
+        self.base_variation = 0.0005  # 0.05% base variation
+        self.mixing_time = 120.0      # Time constant for air mixing (seconds)
+        self.ventilation_effect = 0.02  # Effect of ventilation changes
+        self.pressure_effect = 0.05     # Effect of pressure variations
+        
+        # Mean reversion parameters
+        self.mean_reversion_rate = 0.01  # Rate at which the system returns to nominal
+        self.volatility = 0.0003        # Volatility of the process
         
         # Initialize true value state variables
         self._last_true_value = 0.0
         self._ventilation_state = 0.0
         self._pressure_state = 0.0
+    
+    def generate(self, time_step: float = 1.0, base_co2: float = 0.5) -> float:
+        """
+        Generate realistic variation in true CO2 level using a mean-reverting process
         
+        Args:
+            time_step: Time step in seconds
+            base_co2: Base CO2 level in mmHg
+            
+        Returns:
+            float: True CO2 level with variations (mmHg)
+        """
+        # Mean-reverting process for base variations
+        # dx = -θ(x-μ)dt + σdW
+        # where θ is mean reversion rate, μ is mean (0), σ is volatility
+        mean_reversion_term = -self.mean_reversion_rate * self._last_true_value * time_step
+        random_term = self.volatility * np.sqrt(time_step) * np.random.normal(0, 1)
+        self._last_true_value += mean_reversion_term + random_term
+        
+        # Ventilation effect (slow changes)
+        if np.random.random() < 0.01:  # 1% chance of ventilation change
+            self._ventilation_state = np.random.normal(0, self.ventilation_effect)
+        
+        # Pressure effect (very slow changes)
+        if np.random.random() < 0.001:  # 0.1% chance of pressure change
+            self._pressure_state = np.random.normal(0, self.pressure_effect)
+        
+        return float(base_co2 + self._last_true_value + self._ventilation_state + self._pressure_state)
+
+class PPCO2Sensor:
+    """Models the noise characteristics of a ppCO2 sensor"""
+    def __init__(self, temperature: float = 298.15):
         # Base noise amplitudes at 0.5 mmHg CO2
         self.base_emitter_noise = 0.0004  # 0.1% of full scale
         self.base_shot_noise = 0.00025    # Quantum noise floor
@@ -75,22 +117,6 @@ class PPCO2Model:
         # Reference temperature (25°C = 77°F)
         self.ref_temp_kelvin = 298.15
     
-    def _generate_true_variation(self, time_step: float = 1.0) -> float:
-        """Generate realistic variation in true CO2 level"""
-        # Air mixing effect (first-order system)
-        alpha = np.exp(-time_step / self.mixing_time)
-        self._last_true_value = alpha * self._last_true_value + np.random.normal(0, self.base_variation)
-        
-        # Ventilation effect (slow changes)
-        if np.random.random() < 0.01:  # 1% chance of ventilation change
-            self._ventilation_state = np.random.normal(0, self.ventilation_effect)
-        
-        # Pressure effect (very slow changes)
-        if np.random.random() < 0.001:  # 0.1% chance of pressure change
-            self._pressure_state = np.random.normal(0, self.pressure_effect)
-        
-        return float(self._last_true_value + self._ventilation_state + self._pressure_state)
-    
     def _scale_noise(self, base_noise: float, co2_level: float, is_shot_noise: bool = False) -> float:
         """Scale noise based on CO2 level with non-linear effects at extremes"""
         if is_shot_noise:
@@ -111,34 +137,29 @@ class PPCO2Model:
     
     def generate(self, time_step: float = 1.0, temperature: float = 77.0, co2_level: float = 0.5) -> float:
         """
-        Generate complete ppCO2 measurement including both true value variation and sensor noise
+        Generate sensor noise for the given CO2 level
         
         Args:
             time_step: Time step in seconds
             temperature: Temperature in Fahrenheit
-            co2_level: Base CO2 partial pressure in mmHg
+            co2_level: Current CO2 level in mmHg
             
         Returns:
-            float: Total ppCO2 measurement (mmHg)
+            float: Sensor noise (mmHg)
         """
-        # Generate true value variation
-        true_variation = self._generate_true_variation(time_step)
-        
-        # Calculate effective CO2 level including true variation
-        effective_co2 = co2_level + true_variation
-        
         # Generate sensor noise components
-        emitter_noise = float(self.emitter_noise.generate() * self._scale_noise(1.0, effective_co2))
-        shot_noise = float(self.shot_noise.generate() * self._scale_noise(1.0, effective_co2, is_shot_noise=True))
+        emitter_noise = float(self.emitter_noise.generate() * self._scale_noise(1.0, co2_level))
+        shot_noise = float(self.shot_noise.generate() * self._scale_noise(1.0, co2_level, is_shot_noise=True))
         thermal_noise = float(self.thermal_noise.generate())
-        ambient_noise = float(self.ambient_noise.generate() * self._scale_noise(1.0, effective_co2))
+        ambient_noise = float(self.ambient_noise.generate() * self._scale_noise(1.0, co2_level))
         
         # Calculate temperature scaling
         temp_scale = self._scale_temperature(temperature)
         
-        sensor_noise = emitter_noise * (1.0 + temp_scale * self.temp_scaling['emitter']) + \
-            shot_noise * (1.0 + temp_scale * self.temp_scaling['shot']) + \
-            thermal_noise * (1.0 + temp_scale * self.temp_scaling['thermal']) + \
+        # Combine noise components
+        return float(
+            emitter_noise * (1.0 + temp_scale * self.temp_scaling['emitter']) +
+            shot_noise * (1.0 + temp_scale * self.temp_scaling['shot']) +
+            thermal_noise * (1.0 + temp_scale * self.temp_scaling['thermal']) +
             ambient_noise * (1.0 + temp_scale * self.temp_scaling['ambient'])
-
-        return float(effective_co2 + sensor_noise) 
+        ) 
