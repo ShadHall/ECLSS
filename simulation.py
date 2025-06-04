@@ -5,6 +5,8 @@ import os
 import json
 import time
 from datetime import datetime
+from sensor_noise import PPCO2Model
+
 # Simulation settings
 real_time_mode = True  # Set to False to run as fast as possible
 simulation_speed = 1.0  # 1.0 = real-time (1 second per step), 2.0 = 2x faster, etc.
@@ -92,6 +94,35 @@ cabin = {
     # "MOXIE": 172,
 }
 
+sensor_parameters = {
+    "ppO2": {'true_value': 165, 'temp': 80, 'std_dev': 0.165},
+    "ppCO2": {
+        'true_value': 6,  # Base ppCO2 value in mmHg
+        'temp': 80,         # Temperature in Fahrenheit
+        'noise_model': PPCO2Model()  # Initialize with new model
+    },
+    "humidity": {'true_value': 52, 'temp': 80, 'std_dev': 0.5},
+    "ppO21": {'true_value': 165, 'temp': 80, 'std_dev': 0.165},
+    "ppCO21": {
+        'true_value': 6,  # Base ppCO2 value in mmHg
+        'temp': 80,         # Temperature in Fahrenheit
+        'noise_model': PPCO2Model()  # Initialize with new model
+    },
+    "humidity1": {'true_value': 52, 'temp': 80, 'std_dev': 0.5},
+}
+
+def noise_model(sensor_parameters):
+    if 'noise_model' in sensor_parameters:
+        # For ppCO2, use the complete model with fixed time step
+        return sensor_parameters['noise_model'].generate(
+            time_step=1.0,
+            temperature=sensor_parameters['temp'],
+            co2_level=sensor_parameters['true_value']
+        )
+    else:
+        # For other sensors, use the old noise model
+        return np.random.normal(0, sensor_parameters["std_dev"])
+
 # Simulate over time
 time_steps = 10000
 counter = [0]
@@ -101,13 +132,12 @@ def simulate_step(cabin):
     """
     if counter[0] > 10:
         cabin = {
-            "ppO2": 165, 
-            "ppCO2": 6, 
-            "humidity": 52, 
-            "ppO21": 165, 
-            "ppCO21": 6, 
-            "humidity1": 52, 
-   
+            "ppO2": sensor_parameters["ppO2"]["true_value"] + noise_model(sensor_parameters["ppO2"]), 
+            "ppCO2": noise_model(sensor_parameters["ppCO2"]),  # Use noise model output directly
+            "humidity": sensor_parameters["humidity"]["true_value"] + noise_model(sensor_parameters["humidity"]), 
+            "ppO21": sensor_parameters["ppO21"]["true_value"] + noise_model(sensor_parameters["ppO21"]), 
+            "ppCO21": noise_model(sensor_parameters["ppCO21"]),  # Use noise model output directly
+            "humidity1": sensor_parameters["humidity1"]["true_value"] + noise_model(sensor_parameters["humidity1"]),
         }
         return cabin
 
