@@ -120,15 +120,21 @@ class PPCO2Sensor:
     def _scale_noise(self, base_noise: float, co2_level: float, is_shot_noise: bool = False) -> float:
         """Scale noise based on CO2 level with non-linear effects at extremes"""
         if is_shot_noise:
-            return base_noise * np.sqrt(co2_level / 0.5)
+            return base_noise * np.sqrt(co2_level / 2.5)
         
-        # Simplified non-linear scaling
-        if co2_level < 0.5:
-            scale = (co2_level / 0.5) * (1.0 + 0.2 * (0.5 - co2_level))
-        elif co2_level > 2.0:
-            scale = (co2_level / 0.5) * (1.0 - 0.1 * (co2_level - 2.0))
+        # Non-linear scaling with wider ranges for -2 to 8 mmHg operation
+        if co2_level < 0.0:
+            # Enhanced sensitivity for negative values
+            scale = (co2_level / 2.5) * (1.0 + 0.3 * (0.0 - co2_level))
+        elif co2_level < 2.5:
+            # Linear scaling below reference
+            scale = co2_level / 2.5
+        elif co2_level < 5.0:
+            # Linear scaling above reference
+            scale = co2_level / 2.5
         else:
-            scale = co2_level / 0.5
+            # Reduced scaling for very high values to prevent excessive noise
+            scale = (co2_level / 2.5) * (1.0 - 0.15 * (co2_level - 5.0))
         return base_noise * scale
     
     def _scale_temperature(self, temp_f: float) -> float:
