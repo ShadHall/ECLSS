@@ -75,7 +75,7 @@ class PPCO2TrueValue:
         Returns:
             float: True CO2 level with variations (mmHg)
         """
-        # Mean-reverting process for base variations
+        # Mean-reverting process for base variations (implemented as an Ohrnstein-Uhlenbeck process)
         # dx = -θ(x-μ)dt + σdW
         # where θ is mean reversion rate, μ is mean (0), σ is volatility
         mean_reversion_term = -self.mean_reversion_rate * self._last_true_value * time_step
@@ -93,7 +93,7 @@ class PPCO2TrueValue:
         return float(base_co2 + self._last_true_value + self._ventilation_state + self._pressure_state)
 
 class PPCO2Sensor:
-    """Models the noise characteristics of a ppCO2 sensor"""
+    """Models the noise characteristics of a NDIR ppCO2 sensor"""
     def __init__(self, temperature: float = 298.15):
         # Base noise amplitudes at 0.5 mmHg CO2
         self.base_emitter_noise = 0.0004  # 0.1% of full scale
