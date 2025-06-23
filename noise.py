@@ -48,7 +48,7 @@ class FlickerNoise(NoiseComponent):
         return self._last_value
 
 class RandomWalkNoise(NoiseComponent):
-    """Random walk with occasional resets to simulate sensor drift and recalibration"""
+    """Random walk with occasional resets to simulate sensor walk and recalibration"""
     def __init__(self, amplitude: float, frequency: float = 0.01):
         super().__init__(amplitude)
         self.frequency = frequency
@@ -83,7 +83,6 @@ class PPCO2TrueValue:
         Generate realistic variation in true CO2 level using a mean-reverting process
         
         Args:
-            time_step: Time step in seconds
             base_co2: Base CO2 level in mmHg
             
         Returns:
@@ -225,7 +224,7 @@ class PPO2Sensor:
     """Models the noise characteristics of an electrochemical ppO2 sensor, including humidity and temperature effects"""
     def __init__(self, calibration_temp_c: float = 23.0, nominal_ppO2: float = 163.81, nominal_humidity: float = 50.0):
         # Base noise amplitudes at nominal conditions (all reduced)
-        self.base_drift_noise = 0.01      # mmHg, random walk (reduced)
+        self.base_walk_noise = 0.01      # mmHg, random walk (reduced)
         self.base_random_noise = 0.01    # mmHg, white noise (reduced)
         self.base_thermal_noise = 0.01   # mmHg, temperature noise (reduced)
         self.base_ambient_noise = 0.01   # mmHg, flicker noise (reduced)
@@ -238,14 +237,14 @@ class PPO2Sensor:
 
         # Temperature scaling factors (per degree C deviation from calibration)
         self.temp_scaling = {
-            'drift': 0.002,    # per deg C
+            'walk': 0.002,    # per deg C
             'random': 0.001,   # per deg C
             'thermal': 0.003,  # per deg C
             'ambient': 0.001   # per deg C
         }
 
-        # State for drift noise
-        self._last_drift = 0.0
+        # State for random walk noise
+        self._last_walk = 0.0
         self.rng = np.random.RandomState()
         self._last_ambient = 0.0
 
@@ -279,10 +278,10 @@ class PPO2Sensor:
         else:
             temp_c = temperature
 
-        # Drift noise (random walk)
-        drift_scale = self._scale_noise(self.base_drift_noise, ppO2_level) * self._scale_temperature(temp_c, 'drift')
-        self._last_drift += self.rng.normal(0, drift_scale)
-        drift_noise = self._last_drift
+        # Random walk noise
+        walk_scale = self._scale_noise(self.base_walk_noise, ppO2_level) * self._scale_temperature(temp_c, 'walk')
+        self._last_walk += self.rng.normal(0, walk_scale)
+        walk_noise = self._last_walk
 
         # Random/white noise
         random_noise = self.rng.normal(0, self._scale_noise(self.base_random_noise, ppO2_level) * self._scale_temperature(temp_c, 'random'))
@@ -300,7 +299,7 @@ class PPO2Sensor:
         humidity_bias = self._humidity_bias(humidity)
 
         # Combine all noise components
-        return float(drift_noise + random_noise + thermal_noise + ambient_noise + humidity_bias)
+        return float(walk_noise + random_noise + thermal_noise + ambient_noise + humidity_bias)
 
 class HumidityTrueValue:
     """Models the true humidity variations in the environment using an Ornstein-Uhlenbeck process with rare event-driven changes."""
@@ -323,22 +322,22 @@ class HumidityTrueValue:
         return float(self._last_value + self._event_state)
 
 class HumiditySensor:
-    """Models the noise characteristics of a capacitive humidity sensor with drift, flicker, and white noise."""
-    def __init__(self, base_noise: float = 0.02, drift_noise: float = 0.00005, flicker_noise: float = 0.01):
+    """Models the noise characteristics of a capacitive humidity sensor with random walk, flicker, and white noise."""
+    def __init__(self, base_noise: float = 0.02, walk_noise: float = 0.00005, flicker_noise: float = 0.01):
         self.base_noise = base_noise      # White noise, %RH (set for ISS/space-rated sensor)
-        self.drift_noise = drift_noise    # Random walk drift, %RH
+        self.walk_noise = walk_noise    # Random walk, %RH
         self.flicker_noise = flicker_noise  # Flicker noise, %RH
         self.rng = np.random.RandomState()
-        self._last_drift = 0.0
+        self._last_walk = 0.0
         self._last_flicker = 0.0
 
     def generate(self, true_humidity: float) -> float:
-        # Drift (random walk)
-        self._last_drift += self.rng.normal(0, self.drift_noise)
+        # Random walk (random walk)
+        self._last_walk += self.rng.normal(0, self.walk_noise)
         # Flicker noise (1/f, low frequency)
         alpha = np.exp(-0.05)  # Lower frequency than white noise
         self._last_flicker = alpha * self._last_flicker + self.rng.normal(0, self.flicker_noise * np.sqrt(1 - alpha))
         # White noise
         white_noise = self.rng.normal(0, self.base_noise)
         # Combine all noise components
-        return float(true_humidity + self._last_drift + self._last_flicker + white_noise)
+        return float(true_humidity + self._last_walk + self._last_flicker + white_noise)
