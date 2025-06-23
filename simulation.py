@@ -5,7 +5,7 @@ import os
 import json
 import time
 from datetime import datetime
-from noise import PPCO2TrueValue, PPCO2Sensor
+from noise import PPCO2TrueValue, PPCO2Sensor, PPO2TrueValue, PPO2Sensor, HumidityTrueValue, HumiditySensor
 
 # Simulation settings
 real_time_mode = True  # Set to False to run as fast as possible
@@ -96,35 +96,68 @@ cabin = {
 
 # Initialize the true value model (shared between sensors)
 true_co2_model = PPCO2TrueValue()
+true_o2_model = PPO2TrueValue()
+true_humidity_model = HumidityTrueValue()
+humidity_sensor_model = HumiditySensor()
 
 sensor_parameters = {
-    "ppO2": {'true_value': 165, 'temp': 80, 'std_dev': 0.165},
+    "ppO2": {
+        'true_value': 165,  # Base ppO2 value in mmHg
+        'temp': 80,            # Temperature in Fahrenheit
+        'humidity': 52,        # Humidity in %RH
+        'noise_model': PPO2Sensor()
+    },
     "ppCO2": {
         'true_value': 6,  # Base ppCO2 value in mmHg
         'temp': 80,         # Temperature in Fahrenheit
         'noise_model': PPCO2Sensor()  # Initialize with sensor model
     },
-    "humidity": {'true_value': 52, 'temp': 80, 'std_dev': 0.5},
-    "ppO21": {'true_value': 165, 'temp': 80, 'std_dev': 0.165},
+    "humidity": {
+        'true_value': 52,
+        'temp': 80,
+        'noise_model': HumiditySensor()
+    },
+    "ppO21": {
+        'true_value': 165,  # Base ppO2 value in mmHg
+        'temp': 80,            # Temperature in Fahrenheit
+        'humidity': 52,        # Humidity in %RH
+        'noise_model': PPO2Sensor()
+    },
     "ppCO21": {
         'true_value': 6,  # Base ppCO2 value in mmHg
         'temp': 80,         # Temperature in Fahrenheit
         'noise_model': PPCO2Sensor()  # Initialize with sensor model
     },
-    "humidity1": {'true_value': 52, 'temp': 80, 'std_dev': 0.5},
+    "humidity1": {
+        'true_value': 52,
+        'temp': 80,
+        'noise_model': HumiditySensor()
+    },
 }
 
-def noise_model(sensor_parameters, co2_level=None):
+def noise_model(sensor_parameters, co2_level=None, o2_level=None, humidity=None):
     if 'noise_model' in sensor_parameters:
         # For ppCO2, use the sensor model with fixed time step
-        return sensor_parameters['noise_model'].generate(
-            time_step=1.0,
-            temperature=sensor_parameters['temp'],
-            co2_level=co2_level if co2_level is not None else sensor_parameters['true_value']
-        )
+        if isinstance(sensor_parameters['noise_model'], PPCO2Sensor):
+            return sensor_parameters['noise_model'].generate(
+                time_step=1.0,
+                temperature=sensor_parameters['temp'],
+                co2_level=co2_level if co2_level is not None else sensor_parameters['true_value']
+            )
+        elif isinstance(sensor_parameters['noise_model'], PPO2Sensor):
+            return sensor_parameters['noise_model'].generate(
+                time_step=1.0,
+                temperature=sensor_parameters['temp'],
+                ppO2_level=o2_level if o2_level is not None else sensor_parameters['true_value'],
+                humidity=humidity if humidity is not None else sensor_parameters.get('humidity', 50.0)
+            )
+        elif isinstance(sensor_parameters['noise_model'], HumiditySensor):
+            return sensor_parameters['noise_model'].generate(
+                humidity if humidity is not None else sensor_parameters['true_value']
+            )
     else:
         # For other sensors, use the old noise model
-        return np.random.normal(0, sensor_parameters["std_dev"])
+        return np.random.normal(0, 0.5)  # fallback, should not be used
 
 # Simulate over time
 time_steps = 10000
@@ -136,14 +169,23 @@ def simulate_step(cabin):
     if counter[0] > 10:
         # Get the true CO2 value with variations
         true_co2 = true_co2_model.generate(time_step=1.0, base_co2=sensor_parameters["ppCO2"]["true_value"])
-        
+        # Get the true O2 value with variations
+        true_o2 = true_o2_model.generate(time_step=1.0, base_o2=sensor_parameters["ppO2"]["true_value"])
+        # Get the true humidity value with variations
+        true_humidity = true_humidity_model.generate(time_step=1.0)
+
+        temp = sensor_parameters["ppO2"].get("temp", 80)
+
+        measured_humidity = noise_model(sensor_parameters["humidity"], humidity=true_humidity)
+        measured_humidity1 = noise_model(sensor_parameters["humidity1"], humidity=true_humidity)
+
         cabin = {
-            "ppO2": sensor_parameters["ppO2"]["true_value"] + noise_model(sensor_parameters["ppO2"]), 
-            "ppCO2": true_co2 + noise_model(sensor_parameters["ppCO2"], co2_level=true_co2), 
-            "humidity": sensor_parameters["humidity"]["true_value"] + noise_model(sensor_parameters["humidity"]), 
-            "ppO21": sensor_parameters["ppO21"]["true_value"] + noise_model(sensor_parameters["ppO21"]), 
-            "ppCO21": true_co2 + noise_model(sensor_parameters["ppCO21"], co2_level=true_co2), 
-            "humidity1": sensor_parameters["humidity1"]["true_value"] + noise_model(sensor_parameters["humidity1"]),
+            "ppO2": true_o2 + noise_model(sensor_parameters["ppO2"], o2_level=true_o2, humidity=measured_humidity),
+            "ppCO2": true_co2 + noise_model(sensor_parameters["ppCO2"], co2_level=true_co2),
+            "humidity": measured_humidity,
+            "ppO21": true_o2 + noise_model(sensor_parameters["ppO21"], o2_level=true_o2, humidity=measured_humidity1),
+            "ppCO21": true_co2 + noise_model(sensor_parameters["ppCO21"], co2_level=true_co2),
+            "humidity1": measured_humidity1
         }
         return cabin
 
