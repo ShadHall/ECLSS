@@ -49,34 +49,33 @@ class FlickerNoise(NoiseComponent):
 
 class RandomWalkNoise(NoiseComponent):
     """Random walk with occasional resets to simulate sensor walk and recalibration"""
-    def __init__(self, amplitude: float, frequency: float = 0.01):
+    def __init__(self, amplitude: float, frequency: float = 0.01, max_drift: float = 0.01):
         super().__init__(amplitude)
         self.frequency = frequency
-        # Create a separate random number generator for this instance
+        self.max_drift = max_drift  # Maximum allowed drift
         self.rng = np.random.RandomState()
     
     def generate(self, time_step: float = 1.0) -> float:
         if self.rng.random() < self.frequency:
             self._last_value = 0.0
         self._last_value += self.rng.normal(0, self.amplitude)
+        # Clamp to [-max_drift, max_drift] to prevent unbounded drift
+        self._last_value = np.clip(self._last_value, -self.max_drift, self.max_drift)
         return self._last_value
 
 class PPCO2TrueValue:
     """Models the true CO2 level variations in the environment"""
     def __init__(self):
-        # True value variation parameters
-        self.base_variation = 0.0005  # 0.05% base variation
-        self.ventilation_effect = 0.02  # Effect of ventilation changes
-        self.pressure_effect = 0.05     # Effect of pressure variations
-        
-        # Mean reversion parameters
-        self.mean_reversion_rate = 0.017  # Rate at which the system returns to nominal
-        self.volatility = 0.0003        # Volatility of the process
-        
-        # Initialize true value state variables
+        self.base_variation = 0.0005
+        self.ventilation_effect = 0.002  # Reduced from 0.02
+        self.pressure_effect = 0.005     # Reduced from 0.05
+        # Increased mean reversion rate to reduce drift
+        self.mean_reversion_rate = 0.05  # was 0.017
+        self.volatility = 0.0003
         self._last_true_value = 0.0
         self._ventilation_state = 0.0
         self._pressure_state = 0.0
+
     
     def generate(self, time_step: float = 1.0, base_co2: float = 0.5) -> float:
         """
@@ -98,12 +97,12 @@ class PPCO2TrueValue:
         # Ventilation effect (slow changes)
         if np.random.random() < 0.01:  # 1% chance of ventilation change
             self._ventilation_state = np.random.normal(0, self.ventilation_effect)
-        
-        # Pressure effect (very slow changes)
-        if np.random.random() < 0.001:  # 0.1% chance of pressure change
+        self._ventilation_state *= 0.95  # faster decay
+        if np.random.random() < 0.001:
             self._pressure_state = np.random.normal(0, self.pressure_effect)
-        
-        return float(base_co2 + self._last_true_value + self._ventilation_state + self._pressure_state)
+        self._pressure_state *= 0.95  # faster decay
+        result = float(base_co2 + self._last_true_value + self._ventilation_state + self._pressure_state)
+        return result
 
 class PPCO2Sensor:
     """Models the noise characteristics of a NDIR ppCO2 sensor"""
@@ -182,16 +181,11 @@ class PPCO2Sensor:
 class PPO2TrueValue:
     """Models the true O2 level variations in the environment"""
     def __init__(self):
-        # True value variation parameters
-        self.base_variation = 0.001  # 0.1% base variation (kept for now)
-        self.ventilation_effect = 0.001  # Effect of ventilation changes (reduced)
-        self.pressure_effect = 0.002     # Effect of pressure variations (reduced)
-
-        # Mean reversion parameters
-        self.mean_reversion_rate = 0.017  # Rate at which the system returns to nominal (same as CO2)
-        self.volatility = 0.00002        # Volatility of the process (reduced)
-
-        # Initialize true value state variables
+        self.base_variation = 0.001
+        self.ventilation_effect = 0.001
+        self.pressure_effect = 0.002
+        self.mean_reversion_rate = 0.05  # was 0.017
+        self.volatility = 0.00002
         self._last_true_value = 0.0
         self._ventilation_state = 0.0
         self._pressure_state = 0.0
@@ -209,13 +203,10 @@ class PPO2TrueValue:
         mean_reversion_term = -self.mean_reversion_rate * self._last_true_value * time_step
         random_term = self.volatility * np.sqrt(time_step) * np.random.normal(0, 1)
         self._last_true_value += mean_reversion_term + random_term
-
-        # Ventilation effect (slow changes)
-        if np.random.random() < 0.01:  # 1% chance of ventilation change
+        if np.random.random() < 0.01:
             self._ventilation_state = np.random.normal(0, self.ventilation_effect)
-
-        # Pressure effect (very slow changes)
-        if np.random.random() < 0.001:  # 0.1% chance of pressure change
+        self._ventilation_state *= 0.95
+        if np.random.random() < 0.001:
             self._pressure_state = np.random.normal(0, self.pressure_effect)
 
         return float(base_o2 + self._last_true_value + self._ventilation_state + self._pressure_state)
@@ -247,6 +238,7 @@ class PPO2Sensor:
         self._last_walk = 0.0
         self.rng = np.random.RandomState()
         self._last_ambient = 0.0
+        self._max_walk = 0.05  # clamp walk noise
 
     def _scale_noise(self, base_noise: float, ppO2_level: float) -> float:
         """Scale noise based on ppO2 level (linear scaling)"""
@@ -281,6 +273,8 @@ class PPO2Sensor:
         # Random walk noise
         walk_scale = self._scale_noise(self.base_walk_noise, ppO2_level) * self._scale_temperature(temp_c, 'walk')
         self._last_walk += self.rng.normal(0, walk_scale)
+        # Clamp walk noise
+        self._last_walk = np.clip(self._last_walk, -self._max_walk, self._max_walk)
         walk_noise = self._last_walk
 
         # Random/white noise
@@ -302,11 +296,11 @@ class PPO2Sensor:
         return float(walk_noise + random_noise + thermal_noise + ambient_noise + humidity_bias)
 
 class HumidityTrueValue:
-    """Models the true humidity variations in the environment using an Ornstein-Uhlenbeck process with rare event-driven changes."""
-    def __init__(self, nominal_humidity: float = 52.0, mean_reversion: float = 0.017, volatility: float = 0.002):
-        self.nominal_humidity = nominal_humidity  # %RH, NASA-STD-3001 optimal
-        self.mean_reversion = mean_reversion      # Matched to ppO2/ppCO2 (0.017)
-        self.volatility = volatility              # Lowered for realistic 1s changes
+    """Models the true humidity variations in the environment, now with stronger mean reversion, faster event decay, and clamping."""
+    def __init__(self, nominal_humidity: float = 52.0, mean_reversion: float = 0.05, volatility: float = 0.002):
+        self.nominal_humidity = nominal_humidity
+        self.mean_reversion = mean_reversion  # was 0.017
+        self.volatility = volatility
         self._last_value = nominal_humidity
         self._event_state = 0.0
 
@@ -318,22 +312,25 @@ class HumidityTrueValue:
         # Rare event-driven changes (e.g., crew activity, equipment cycling)
         if np.random.random() < 0.0001:  # ~once every 2.7 hours
             self._event_state = np.random.normal(0, 0.05)  # Small event, up to ±0.05% RH
-        self._event_state *= 0.98
+        self._event_state *= 0.90
         return float(self._last_value + self._event_state)
 
 class HumiditySensor:
     """Models the noise characteristics of a capacitive humidity sensor with random walk, flicker, and white noise."""
     def __init__(self, base_noise: float = 0.02, walk_noise: float = 0.00005, flicker_noise: float = 0.01):
-        self.base_noise = base_noise      # White noise, %RH (set for ISS/space-rated sensor)
-        self.walk_noise = walk_noise    # Random walk, %RH
-        self.flicker_noise = flicker_noise  # Flicker noise, %RH
+        self.base_noise = base_noise
+        self.walk_noise = walk_noise
+        self.flicker_noise = flicker_noise
         self.rng = np.random.RandomState()
         self._last_walk = 0.0
         self._last_flicker = 0.0
+        self._max_walk = 0.2  # clamp walk noise
 
     def generate(self, true_humidity: float) -> float:
         # Random walk (random walk)
         self._last_walk += self.rng.normal(0, self.walk_noise)
+        # Clamp walk noise
+        self._last_walk = np.clip(self._last_walk, -self._max_walk, self._max_walk)
         # Flicker noise (1/f, low frequency)
         alpha = np.exp(-0.05)  # Lower frequency than white noise
         self._last_flicker = alpha * self._last_flicker + self.rng.normal(0, self.flicker_noise * np.sqrt(1 - alpha))
